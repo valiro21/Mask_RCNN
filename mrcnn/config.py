@@ -5,8 +5,13 @@ Base Configurations class.
 Copyright (c) 2017 Matterport, Inc.
 Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
+
+Modifications
+Copyright (c) 2018/2019 Roland S. Zimmermann, Julien Siems
+Licensed under the MIT License (see LICENSE for details)
 """
 
+import math
 import numpy as np
 
 
@@ -24,7 +29,7 @@ class Config(object):
     # experiment is running.
     NAME = None  # Override in sub-classes
 
-    # NUMBER OF GPUs to use. When using only a CPU, this needs to be set to 1.
+    # NUMBER OF GPUs to use. For CPU training, use 1
     GPU_COUNT = 1
 
     # Number of images to train with on each GPU. A 12GB GPU can typically
@@ -90,11 +95,8 @@ class Config(object):
 
     # How many anchors per image to use for RPN training
     RPN_TRAIN_ANCHORS_PER_IMAGE = 256
-    
-    # ROIs kept after tf.nn.top_k and before non-maximum suppression
-    PRE_NMS_LIMIT = 6000
 
-    # ROIs kept after non-maximum suppression (training and inference)
+    # ROIs kept after non-maximum supression (training and inference)
     POST_NMS_ROIS_TRAINING = 2000
     POST_NMS_ROIS_INFERENCE = 1000
 
@@ -104,7 +106,7 @@ class Config(object):
     MINI_MASK_SHAPE = (56, 56)  # (height, width) of the mini-mask
 
     # Input image resizing
-    # Generally, use the "square" resizing mode for training and predicting
+    # Generally, use the "square" resizing mode for training and inferencing
     # and it should work well in most cases. In this mode, images are scaled
     # up such that the small side is = IMAGE_MIN_DIM, but ensuring that the
     # scaling doesn't make the long side > IMAGE_MAX_DIM. Then the image is
@@ -129,12 +131,8 @@ class Config(object):
     # Minimum scaling ratio. Checked after MIN_IMAGE_DIM and can force further
     # up scaling. For example, if set to 2 then images are scaled up to double
     # the width and height, or more, even if MIN_IMAGE_DIM doesn't require it.
-    # However, in 'square' mode, it can be overruled by IMAGE_MAX_DIM.
+    # Howver, in 'square' mode, it can be overruled by IMAGE_MAX_DIM.
     IMAGE_MIN_SCALE = 0
-    # Number of color channels per image. RGB = 3, grayscale = 1, RGB-D = 4
-    # Changing this requires other changes in the code. See the WIKI for more
-    # details: https://github.com/matterport/Mask_RCNN/wiki
-    IMAGE_CHANNEL_COUNT = 3
 
     # Image mean (RGB)
     MEAN_PIXEL = np.array([123.7, 116.8, 103.9])
@@ -176,7 +174,7 @@ class Config(object):
 
     # Learning rate and momentum
     # The Mask RCNN paper uses lr=0.02, but on TensorFlow it causes
-    # weights to explode. Likely due to differences in optimizer
+    # weights to explode. Likely due to differences in optimzer
     # implementation.
     LEARNING_RATE = 0.001
     LEARNING_MOMENTUM = 0.9
@@ -204,11 +202,18 @@ class Config(object):
     # Train or freeze batch normalization layers
     #     None: Train BN layers. This is the normal mode
     #     False: Freeze BN layers. Good when using a small batch size
-    #     True: (don't use). Set layer in training mode even when predicting
+    #     True: (don't use). Set layer in training mode even when inferencing
     TRAIN_BN = False  # Defaulting to False since batch size is often small
 
     # Gradient norm clipping
     GRADIENT_CLIP_NORM = 5.0
+
+    RUN_NAME = None
+    EDGE_LOSS_SMOOTHING = False
+    EDGE_LOSS_FILTERS = []
+    EDGE_LOSS_NORM = "l2"
+    EDGE_LOSS_WEIGHT_FACTOR = 1.0
+    EDGE_LOSS_WEIGHT_ENTROPY = False
 
     def __init__(self):
         """Set values of computed attributes."""
@@ -217,20 +222,18 @@ class Config(object):
 
         # Input image size
         if self.IMAGE_RESIZE_MODE == "crop":
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM, self.IMAGE_MIN_DIM,
-                self.IMAGE_CHANNEL_COUNT])
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MIN_DIM, self.IMAGE_MIN_DIM, 3])
         else:
-            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM,
-                self.IMAGE_CHANNEL_COUNT])
+            self.IMAGE_SHAPE = np.array([self.IMAGE_MAX_DIM, self.IMAGE_MAX_DIM, 3])
 
         # Image meta data length
         # See compose_image_meta() for details
         self.IMAGE_META_SIZE = 1 + 3 + 3 + 4 + 1 + self.NUM_CLASSES
 
-    def display(self):
+    def display(self, file=None):
         """Display Configuration values."""
-        print("\nConfigurations:")
+        print("\nConfigurations:", file=file)
         for a in dir(self):
             if not a.startswith("__") and not callable(getattr(self, a)):
-                print("{:30} {}".format(a, getattr(self, a)))
-        print("\n")
+                print("{:30} {}".format(a, getattr(self, a)), file=file)
+        print("\n", file=file)

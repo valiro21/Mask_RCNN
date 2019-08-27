@@ -1,38 +1,43 @@
 """
 Mask R-CNN
 Configurations and data loading code for MS COCO.
-
 Copyright (c) 2017 Matterport, Inc.
 Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
 
-------------------------------------------------------------
+Modifications
+Copyright (c) 2018/2019 Roland S. Zimmermann, Julien Siems
+Licensed under the MIT License (see LICENSE for details)
 
+------------------------------------------------------------
 Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
-
     # Train a new model starting from pre-trained COCO weights
     python3 coco.py train --dataset=/path/to/coco/ --model=coco
-
     # Train a new model starting from ImageNet weights. Also auto download COCO dataset
     python3 coco.py train --dataset=/path/to/coco/ --model=imagenet --download=True
-
     # Continue training a model that you had trained earlier
     python3 coco.py train --dataset=/path/to/coco/ --model=/path/to/weights.h5
-
     # Continue training the last model you trained
     python3 coco.py train --dataset=/path/to/coco/ --model=last
-
     # Run COCO evaluatoin on the last model you trained
     python3 coco.py evaluate --dataset=/path/to/coco/ --model=last
 """
 
+import csv
 import os
 import sys
 import time
-import numpy as np
-import imgaug  # https://github.com/aleju/imgaug (pip3 install imgaug)
 
+import imgaug  # https://github.com/aleju/imgaug (pip3 install imgaug)
+import numpy as np
+from tqdm import tqdm
+
+# Root directory of the project
+ROOT_DIR = os.path.abspath("../../")
+
+# Import Mask RCNN
+sys.path.append(ROOT_DIR)  # To find local version of the library
 # Download and install the Python COCO tools from https://github.com/waleedka/coco
 # That's a fork from the original https://github.com/pdollar/coco with a bug
 # fix for Python 3.
@@ -63,6 +68,7 @@ COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
 DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
 DEFAULT_DATASET_YEAR = "2014"
 
+
 ############################################################
 #  Configurations
 ############################################################
@@ -85,6 +91,19 @@ class CocoConfig(Config):
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 80  # COCO has 80 classes
+
+    def __init__(self, args):
+        super().__init__()
+
+        if args:
+            self.RUN_NAME = args.run_name
+            self.EDGE_LOSS_SMOOTHING_GT = args.edge_loss_smoothing_groundtruth
+            self.EDGE_LOSS_SMOOTHING_PREDICTIONS = args.edge_loss_smoothing_predictions
+            self.EDGE_LOSS_FILTERS = args.edge_loss_filters
+            self.EDGE_LOSS_NORM = args.edge_loss_norm
+            self.EDGE_LOSS_WEIGHT_FACTOR = args.edge_loss_weight_factor
+            self.EDGE_LOSS_WEIGHT_ENTROPY = args.edge_loss_weight_entropy
+            self.MASK_SHAPE = (args.mask_size, args.mask_size)
 
 
 ############################################################
@@ -219,11 +238,9 @@ class CocoDataset(utils.Dataset):
 
     def load_mask(self, image_id):
         """Load instance masks for the given image.
-
         Different datasets use different ways to store masks. This
         function converts the different mask format to one format
         in the form of a bitmap [height, width, instances].
-
         Returns:
         masks: A bool array of shape [height, width, instance count] with
             one mask per instance.
@@ -339,10 +356,38 @@ def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
     return results
 
 
-def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=None):
+def parse_eval_line(cocoEval):
+    return [
+        ["Precision/Recall", "IoU", "area", "maxDets", "value"],
+        ["Average Precision  (AP)", "0.50:0.95", "all", "100", cocoEval.stats[0]],
+        ["Average Precision  (AP)", "0.50", "all", "100", cocoEval.stats[1]],
+        ["Average Precision  (AP)", "0.75", "all", "100", cocoEval.stats[2]],
+        ["Average Precision  (AP)", "0.50:0.95", "small", "100", cocoEval.stats[3]],
+        ["Average Precision  (AP)", "0.50:0.95", "medium", "100", cocoEval.stats[4]],
+        ["Average Precision  (AP)", "0.50:0.95", "large", "100", cocoEval.stats[5]],
+        ["Average Recall  (AR)", "0.50:0.95", "all", "1", cocoEval.stats[6]],
+        ["Average Recall  (AR)", "0.50:0.95", "all", "10", cocoEval.stats[7]],
+        ["Average Recall  (AR)", "0.50:0.95", "all", "100", cocoEval.stats[8]],
+        ["Average Recall  (AR)", "0.50:0.95", "small", "100", cocoEval.stats[9]],
+        ["Average Recall  (AR)", "0.50:0.95", "medium", "100", cocoEval.stats[10]],
+        ["Average Recall  (AR)", "0.50:0.95", "large", "100", cocoEval.stats[11]]
+    ]
+
+
+def write_eval_to_csv(cocoEval, model_path):
+    step_number = model_path.split('_')[-1].split('.')[0]
+    csv_file_path = os.path.join(os.path.dirname(model_path),
+                                 'coco_eval_type_{}_at_step_{}.csv'.format(cocoEval.params.iouType, step_number))
+    with open(csv_file_path, 'w') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        csv_rows = parse_eval_line(cocoEval)
+        csv_writer.writerows(csv_rows)
+
+
+def evaluate_coco(model, dataset, coco, model_path, limit=0, image_ids=None):
     """Runs official COCO evaluation.
     dataset: A Dataset object with valiadtion data
-    eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
+    model_path: directory which contains the model
     limit: if not 0, it's the number of images to use for evaluation
     """
     # Pick COCO images from the dataset
@@ -359,7 +404,7 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
     t_start = time.time()
 
     results = []
-    for i, image_id in enumerate(image_ids):
+    for i, image_id in enumerate(tqdm(image_ids)):
         # Load image
         image = dataset.load_image(image_id)
 
@@ -380,11 +425,23 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
     coco_results = coco.loadRes(results)
 
     # Evaluate
-    cocoEval = COCOeval(coco, coco_results, eval_type)
+    cocoEval = COCOeval(coco, coco_results, 'segm')
     cocoEval.params.imgIds = coco_image_ids
     cocoEval.evaluate()
     cocoEval.accumulate()
     cocoEval.summarize()
+    write_eval_to_csv(cocoEval, model_path)
+
+    # Load results. This modifies results with additional attributes.
+    coco_results = coco.loadRes(results)
+
+    # Evaluate
+    cocoEval = COCOeval(coco, coco_results, 'bbox')
+    cocoEval.params.imgIds = coco_image_ids
+    cocoEval.evaluate()
+    cocoEval.accumulate()
+    cocoEval.summarize()
+    write_eval_to_csv(cocoEval, model_path)
 
     print("Prediction time: {}. Average {}/image".format(
         t_prediction, t_prediction / len(image_ids)))
@@ -428,17 +485,61 @@ if __name__ == '__main__':
                         metavar="<True|False>",
                         help='Automatically download and unzip MS-COCO files (default=False)',
                         type=bool)
+    parser.add_argument('--edge-loss-smoothing-predictions',
+                        action='store_true',
+                        help='Apply a smoothing method on the predictions before calculating the edge loss.')
+    parser.add_argument('--edge-loss-smoothing-groundtruth',
+                        action='store_true',
+                        help='Apply a smoothing method on the groundtruth before calculating the edge loss.')
+    parser.add_argument('--edge-loss-filters', required=False,
+                        default="",
+                        nargs="*",
+                        metavar='<sobel-x|sobel-y|roberts-x|roberts-<|prewitt-x|prewitt-y|kayyali-nesw|kayyali-senw|laplace>',
+                        help='List of filters to use to calculate the edge loss (default=[]]).',
+                        type=str)
+    parser.add_argument('--run-name', required=False,
+                        default=None,
+                        help='Name of the run (default=None, uses the current time).',
+                        type=str)
+    parser.add_argument('--edge-loss-norm', required=False, default="l2", metavar='<l1|l2|l3|l4|l5>',
+                        help='Set the type of L^p norm to calculate the Edge Loss (default=l2).')
+    parser.add_argument('--training-mode', default='full', metavar='<full|base|fine>', type=str,
+                        help='Either perform the full training schedule or just the final finetuning of 40k steps (default=full).')
+    parser.add_argument('--edge-loss-weight-entropy', action="store_true",
+                        help="Use the pixel-wise edge loss to weight an additional cross entropy.")
+    parser.add_argument('--edge-loss-weight-factor', default=1.0, type=float,
+                        help='Scalar factor to weight the edge loss relatively to the other losses.')
+    parser.add_argument('--mask-size', default=28, type=int,
+                        help='Size of the masks.')
+
     args = parser.parse_args()
+
+    # filter invalid edge filter values
+    valid_edge_filter_values = [
+        "sobel-x", "sobel-y", "sobel-magnitude",
+        "roberts-x", "roberts-y",
+        "prewitt-x", "prewitt-y",
+        "kayyali-nesw", "kayyali-senw",
+        "laplace"
+    ]
+    args.edge_loss_filters = [x for x in args.edge_loss_filters if x in valid_edge_filter_values]
+    args.use_edge_loss = len(args.edge_loss_filters) > 0
+
+    if args.training_mode not in ["full", "fine", "base"]:
+        raise ValueError("training-mode must be either `full`, `base` or `fine`.")
+
+    print("Run's name: ", args.run_name)
     print("Command: ", args.command)
     print("Model: ", args.model)
     print("Dataset: ", args.dataset)
     print("Year: ", args.year)
     print("Logs: ", args.logs)
+    print("Mask Size:", args.mask_size)
     print("Auto Download: ", args.download)
 
     # Configurations
     if args.command == "train":
-        config = CocoConfig()
+        config = CocoConfig(args)
     else:
         class InferenceConfig(CocoConfig):
             # Set batch size to 1 since we'll be running inference on
@@ -446,7 +547,9 @@ if __name__ == '__main__':
             GPU_COUNT = 1
             IMAGES_PER_GPU = 1
             DETECTION_MIN_CONFIDENCE = 0
-        config = InferenceConfig()
+
+
+        config = InferenceConfig(args)
     config.display()
 
     # Create model
@@ -461,6 +564,7 @@ if __name__ == '__main__':
     if args.model.lower() == "coco":
         model_path = COCO_MODEL_PATH
     elif args.model.lower() == "last":
+        # remove the current logdir first
         # Find last trained weights
         model_path = model.find_last()
     elif args.model.lower() == "imagenet":
@@ -469,12 +573,15 @@ if __name__ == '__main__':
     else:
         model_path = args.model
 
-    # Load weights
+    # Load weights & change the log dir
     print("Loading weights ", model_path)
     model.load_weights(model_path, by_name=True)
 
     # Train or evaluate
     if args.command == "train":
+        with open(os.path.join(model.log_dir, "configuration.log"), "w") as file:
+            config.display(file=file)
+
         # Training dataset. Use the training set and 35K from the
         # validation set, as as in the Mask RCNN paper.
         dataset_train = CocoDataset()
@@ -495,40 +602,43 @@ if __name__ == '__main__':
 
         # *** This training schedule is an example. Update to your needs ***
 
-        # Training - Stage 1
-        print("Training network heads")
-        model.train(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=40,
-                    layers='heads',
-                    augmentation=augmentation)
+        if args.training_mode == "full" or args.training_mode == "base":
+            # Training - Stage 1
+            print("Training network heads")
+            model.train(dataset_train, dataset_val,
+                        learning_rate=config.LEARNING_RATE,
+                        epochs=40,
+                        layers='heads',
+                        augmentation=augmentation)
 
-        # Training - Stage 2
-        # Finetune layers from ResNet stage 4 and up
-        print("Fine tune Resnet stage 4 and up")
-        model.train(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE,
-                    epochs=120,
-                    layers='4+',
-                    augmentation=augmentation)
+            # Training - Stage 2
+            # Finetune layers from ResNet stage 4 and up
+            print("Fine tune Resnet stage 4 and up")
+            model.train(dataset_train, dataset_val,
+                        learning_rate=config.LEARNING_RATE,
+                        epochs=120,
+                        layers='4+',
+                        augmentation=augmentation)
 
-        # Training - Stage 3
-        # Fine tune all layers
-        print("Fine tune all layers")
-        model.train(dataset_train, dataset_val,
-                    learning_rate=config.LEARNING_RATE / 10,
-                    epochs=160,
-                    layers='all',
-                    augmentation=augmentation)
+        if args.training_mode == "full" or args.training_mode == "fine":
+            # Training - Stage 3
+            # Fine tune all layers
+            print("Fine tune all layers")
+            model.train(dataset_train, dataset_val,
+                        learning_rate=config.LEARNING_RATE / 10,
+                        epochs=160,
+                        layers='all',
+                        augmentation=augmentation)
 
     elif args.command == "evaluate":
         # Validation dataset
         dataset_val = CocoDataset()
         val_type = "val" if args.year in '2017' else "minival"
-        coco = dataset_val.load_coco(args.dataset, val_type, year=args.year, return_coco=True, auto_download=args.download)
+        coco = dataset_val.load_coco(args.dataset, val_type, year=args.year, return_coco=True,
+                                     auto_download=args.download)
         dataset_val.prepare()
-        print("Running COCO evaluation on {} images.".format(args.limit))
-        evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
+        print("Running COCO evaluation on all validation images.")
+        evaluate_coco(model, dataset_val, coco, model_path, limit=None)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))
