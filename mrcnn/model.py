@@ -42,6 +42,8 @@ from mrcnn import utils
 assert LooseVersion(tf.__version__) >= LooseVersion("1.3")
 assert LooseVersion(keras.__version__) >= LooseVersion('2.0.8')
 
+class InvalidConfigException(Exception): pass
+
 
 ############################################################
 #  Utility Functions
@@ -2342,9 +2344,18 @@ class MaskRCNN():
         metrics. Then calls the Keras compile() function.
         """
         # Optimizer object
-        optimizer = keras.optimizers.SGD(
-            lr=learning_rate, momentum=momentum,
-            clipnorm=self.config.GRADIENT_CLIP_NORM)
+        if self.config.OPTIMIZER == 'SGD':
+          optimizer = keras.optimizers.SGD(
+              lr=learning_rate, momentum=momentum,
+              clipnorm=self.config.GRADIENT_CLIP_NORM)
+        elif self.config.OPTIMIZER == 'ADAM':
+          optimizer = keras.optimizers.Adam(
+              lr=learning_rate,
+              amsgrad=True,
+              clipnorm=self.config.GRADIENT_CLIP_NORM)
+        else:
+          raise InvalidConfigException(f"Invalid optimizer {config.OPTIMIZER}")
+
         # Add Losses
         # First, clear previously set losses to avoid duplication
         self.keras_model._losses = []
@@ -2422,7 +2433,7 @@ class MaskRCNN():
             else:
                 layer.trainable = trainable
             # Print trainble layer names
-            if trainable and verbose > 0:
+            if trainable and verbose >0:
                 log("{}{:20}   ({})".format(" " * indent, layer.name,
                                             layer.__class__.__name__))
 
@@ -2557,8 +2568,8 @@ class MaskRCNN():
             validation_data=val_generator,
             validation_steps=self.config.VALIDATION_STEPS,
             max_queue_size=100,
-            workers=workers,
-            use_multiprocessing=True,
+            workers=1,
+            use_multiprocessing=False,
         )
         self.epoch = max(self.epoch, epochs)
         if self.epoch % save_period != 0:
